@@ -14,6 +14,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 
 from model.extract import ExtractSumm, PtrExtractSumm
+from model.summ import RNNEncoder
 from model.util import sequence_loss
 from training import get_basic_grad_fn, basic_validate
 from training import BasicPipeline, BasicTrainer
@@ -48,7 +49,7 @@ class ExtractDataset(CnnDmDataset):
         return art_sents, extracts
 
 
-def build_batchers(net_type, word2id, cuda, debug):
+def build_batchers(args, net_type, word2id, cuda, debug):
     assert net_type in ['ff', 'rnn']
     prepro = prepro_fn_extract(args.max_word, args.max_sent)
     def sort_key(sample):
@@ -80,19 +81,17 @@ def build_batchers(net_type, word2id, cuda, debug):
     return train_batcher, val_batcher
 
 
-def configure_net(net_type, vocab_size, emb_dim, conv_hidden,
+def configure_net(net_type, vocab_size, emb_dim,
                   lstm_hidden, lstm_layer, bidirectional):
     assert net_type in ['ff', 'rnn']
     net_args = {}
     net_args['vocab_size']    = vocab_size
     net_args['emb_dim']       = emb_dim
-    net_args['conv_hidden']   = conv_hidden
     net_args['lstm_hidden']   = lstm_hidden
     net_args['lstm_layer']    = lstm_layer
     net_args['bidirectional'] = bidirectional
 
-    net = (ExtractSumm(**net_args) if net_type == 'ff'
-           else PtrExtractSumm(**net_args))
+    net = PtrExtractSumm(**net_args)
     return net, net_args
 
 
@@ -119,27 +118,32 @@ def configure_training(net_type, opt, lr, clip_grad, lr_decay, batch_size):
 
     return criterion, train_params
 
-
-def main(args):
+def prep_trainer(args, word2id=None, encoder=None):
     assert args.net_type in ['ff', 'rnn']
+
     # create data batcher, vocabulary
     # batcher
-    with open(join(DATA_DIR, 'vocab_cnt.pkl'), 'rb') as f:
-        wc = pkl.load(f)
-    word2id = make_vocab(wc, args.vsize)
-    train_batcher, val_batcher = build_batchers(args.net_type, word2id,
-                                                args.cuda, args.debug)
+    if word2id is None:
+        with open(join(DATA_DIR, 'vocab_cnt.pkl'), 'rb') as f:
+            wc = pkl.load(f)
+        word2id = make_vocab(wc, args.vsize)
+
+    train_batcher, val_batcher = build_batchers(args, args.net_type, word2id, args.cuda, args.debug)
 
     # make net
     net, net_args = configure_net(args.net_type,
-                                  len(word2id), args.emb_dim, args.conv_hidden,
+                                  len(word2id), args.emb_dim,
                                   args.lstm_hidden, args.lstm_layer, args.bi)
+
     if args.w2v:
         # NOTE: the pretrained embedding having the same dimension
         #       as args.emb_dim should already be trained
         embedding, _ = make_embedding(
             {i: w for w, i in word2id.items()}, args.w2v)
         net.set_embedding(embedding)
+
+    if encoder is not None:
+        net.set_encoder(encoder)
 
     # configure training setting
     criterion, train_params = configure_training(
@@ -176,6 +180,11 @@ def main(args):
 
     print('start training with the following hyper-parameters:')
     print(meta)
+
+    return trainer, net
+
+def main(args):
+    trainer, _ = prep_trainer(args)
     trainer.train()
 
 
